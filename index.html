@@ -392,6 +392,29 @@ function stopAllMessage(token) {
 }
 
 /**
+ * game_sign 的参数尝试顺序。
+ *
+ * 线上接口实测：`connect_code` 会返回 HTTP 500（空响应），只有 `uid` + `token` 可用。
+ * 文档提到 connect_code，因此保留为最后一次兜底；uid 优先带 game_ 前缀（与官方 demo 一致）。
+ */
+function gameSignBodies(uid, token) {
+  const prefixed = loginUserId(uid);
+  const raw = peerUserId(uid);
+  const bodies = [];
+  const seen = new Set();
+  const push = (body) => {
+    const key = JSON.stringify(body);
+    if (seen.has(key)) return;
+    seen.add(key);
+    bodies.push(body);
+  };
+  push({ uid: prefixed, token });
+  if (raw !== prefixed) push({ uid: raw, token });
+  push({ connect_code: `${raw} ${token}` });
+  return bodies;
+}
+
+/**
  * 某一时刻每个指令应运行哪个片段：同一指令重叠时取开始最晚的。
  * 返回 Map<commandId, segment>。
  */
@@ -460,6 +483,7 @@ function formatSeconds(ms) {
 
 
 const STORAGE_KEY = 'ycy.web.project.v1';
+const APP_VERSION = '1.0.1';
 
 const DEFAULT_COMMANDS = [
   { id: 'hurt', label: '刺激', color: '#9c7cff', payload: '' },
@@ -656,20 +680,46 @@ async function connect(rawCode) {
   renderStatus();
   ui.connectError.hidden = true;
 
-  const response = await fetch(`${API_BASE}/user/game_sign`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ connect_code: `${peerUserId(uid)} ${token}` }),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (payload.code !== 1 || !payload.data?.appid || !payload.data?.sign) {
-    throw new Error(payload.msg || `获取签名失败（HTTP ${response.status}）`);
+  let signed = null;
+  let lastError = null;
+  for (const body of gameSignBodies(uid, token)) {
+    const label = Object.keys(body).join('+');
+    try {
+      const response = await fetch(`${API_BASE}/user/game_sign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const text = await response.text();
+      let payload = null;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = null;
+      }
+      if (payload?.code === 1 && payload.data?.appid && payload.data?.sign) {
+        signed = payload.data;
+        log(`签名成功（参数 ${label}）`);
+        break;
+      }
+      const message = payload?.msg || (response.ok ? '返回缺少 appid/sign' : `HTTP ${response.status}`);
+      lastError = new Error(message);
+      log(`签名失败（${label}）：${message}`, 'error');
+    } catch (err) {
+      lastError = new Error(`网络错误：${err?.message || err}`);
+      log(`签名失败（${label}）：${lastError.message}`, 'error');
+    }
+  }
+  if (!signed) {
+    const detail = lastError?.message || '未知错误';
+    const hint = /游戏/.test(detail) ? '（请确认已在 App 创建游戏，并使用刚复制的连接码）' : '';
+    throw new Error(`获取签名失败：${detail}${hint}`);
   }
 
-  const appid = Number(payload.data.appid);
+  const appid = Number(signed.appid);
   const chat = TencentCloudChat.create({ SDKAppID: appid });
   chat.setLogLevel?.(TencentCloudChat.LOG_LEVEL?.NONE ?? 4);
-  await loginReady(chat, loginUserId(uid), payload.data.sign);
+  await loginReady(chat, loginUserId(uid), signed.sign);
 
   session = { status: 'ready', uid, token, chat, appid };
   renderStatus();
@@ -1102,7 +1152,7 @@ function init() {
   ui.videoMeta.textContent = project.videoName
     ? `上次使用：${project.videoName}，请重新选择文件`
     : '—';
-  log('网页版已加载。从役次元 App 启动会自动连接。');
+  log(`网页版 v${APP_VERSION} 已加载。从役次元 App 启动会自动连接。`);
   setInterval(tick, 40);
 
   const params = new URLSearchParams(location.search);
