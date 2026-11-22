@@ -266,6 +266,7 @@ video {
           <span id="playheadLabel" class="mono">0:00</span>
         </div>
         <div id="timeline" class="timeline"></div>
+        <p id="syncHint" class="hint">未播放</p>
         <p class="hint">点击色块编辑；点击行内空白处跳转。</p>
       </section>
 
@@ -483,7 +484,7 @@ function formatSeconds(ms) {
 
 
 const STORAGE_KEY = 'ycy.web.project.v1';
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.0.2';
 
 const DEFAULT_COMMANDS = [
   { id: 'hurt', label: '刺激', color: '#9c7cff', payload: '' },
@@ -512,6 +513,7 @@ const ui = {
   btnAddSegment: $('btnAddSegment'),
   playheadLabel: $('playheadLabel'),
   timeline: $('timeline'),
+  syncHint: $('syncHint'),
   lead: $('lead'),
   leadValue: $('leadValue'),
   stopOnPause: $('stopOnPause'),
@@ -588,6 +590,7 @@ let videoUrl = null;
 let logs = [];
 let sendChain = Promise.resolve();
 let saveTimer = null;
+let syncHintText = '';
 
 function saveProject() {
   clearTimeout(saveTimer);
@@ -751,6 +754,24 @@ function sendStopAll(reason) {
   sendText(stopAllMessage(session.token));
 }
 
+/** 立即发送一条指令，用来验证 App 侧是否执行（不依赖时间轴） */
+function testCommand(command) {
+  if (session.status !== 'ready') {
+    toast('请先连接役次元');
+    return;
+  }
+  let payload;
+  try {
+    payload = parsePayload(command.payload);
+  } catch (err) {
+    log(`payload 无效：${err.message}`, 'error');
+    return;
+  }
+  log(`测试指令 ${command.id}（应立即触发 App 中绑定的设备）`);
+  sendText(buildCommandMessage({ id: command.id, payload, token: session.token }));
+  toast(`已发送测试指令 ${command.id}`);
+}
+
 // ---------------------------------------------------------------- 指令
 
 function renderCommands() {
@@ -781,6 +802,12 @@ function renderCommands() {
     const spacer = document.createElement('span');
     spacer.className = 'spacer';
 
+    const test = document.createElement('button');
+    test.className = 'secondary small';
+    test.textContent = '测试';
+    test.title = '立即发送这条指令，验证 App 是否执行';
+    test.addEventListener('click', () => testCommand(command));
+
     const remove = document.createElement('button');
     remove.className = 'ghost small';
     remove.textContent = '删除';
@@ -793,7 +820,7 @@ function renderCommands() {
       renderTimeline();
     });
 
-    row.append(dot, name, id, spacer, remove);
+    row.append(dot, name, id, spacer, test, remove);
     ui.commandList.append(row);
   }
 }
@@ -891,6 +918,12 @@ function updatePlayhead() {
     head.style.left = left;
   });
   ui.playheadLabel.textContent = formatTime(playheadMs);
+}
+
+function setSyncHint(text) {
+  if (text === syncHintText) return;
+  syncHintText = text;
+  ui.syncHint.textContent = text;
 }
 
 function seekTo(ms) {
@@ -995,6 +1028,11 @@ function tick() {
   const position = (el.video.currentTime || 0) * 1000;
   playheadMs = position;
   const desired = desiredAt(project.segments, position, Number(project.leadMs) || 0);
+  setSyncHint(
+    desired.size > 0
+      ? `运行中：${[...desired.keys()].join('、')}`
+      : '播放中，但当前时间没有片段',
+  );
   const { started, ended } = diffActive(prevActive, desired);
   if (ended.length && project.endStopAll) sendStopAll('片段结束');
   prevActive = desired;
@@ -1119,11 +1157,13 @@ el.video.addEventListener('loadedmetadata', () => {
 el.video.addEventListener('play', () => {
   playing = true;
   prevActive.clear();
+  setSyncHint('播放中…');
   log('开始播放');
 });
 el.video.addEventListener('pause', () => {
   playing = false;
   prevActive.clear();
+  setSyncHint('已暂停');
   if (project.stopOnPause) sendStopAll('暂停');
 });
 el.video.addEventListener('seeked', () => {
@@ -1148,6 +1188,7 @@ function init() {
   renderCommands();
   renderTimeline();
   syncSettingsUi();
+  setSyncHint('未播放');
   ui.videoName.textContent = project.videoName || '未选择';
   ui.videoMeta.textContent = project.videoName
     ? `上次使用：${project.videoName}，请重新选择文件`
